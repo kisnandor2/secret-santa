@@ -1,2 +1,292 @@
-// Bootstrap + view router — see plan-impl.md §8.4
-export {};
+// Bootstrap + view router — see plan-impl.md §8.3 / §8.4
+import * as api from './api.js';
+import * as identity from './identity.js';
+import { connect } from './socket.js';
+import * as views from './views.js';
+
+const app = document.getElementById('app');
+const toastEl = document.getElementById('toast');
+const statusEl = document.getElementById('conn-status');
+
+const MESSAGES = {
+  4001: 'Your session link is invalid.',
+  4004: 'Session ended or not found.',
+  4010: 'Session ended.',
+  4011: 'The host removed you from this session.',
+};
+
+const s = {
+  screen: 'landing',       // landing | hostCreate | join (only while there is no identity)
+  joinCode: '',
+  id: null,                // { code, token, role, name } once created/joined/resumed
+  conn: null,              // socket handle
+  welcomed: false,
+  role: null,              // from welcome
+  code: null,
+  name: null,
+  participantId: null,
+  serverState: 'waiting',
+  participants: [],
+  result: null,            // own draw_result (participant or participating host)
+  drawComplete: false,
+  drawPending: false,
+  revealedByHost: false,   // local only
+  animateHostReveal: false,
+  boxOpened: false,        // local only
+  connected: false,
+  ended: null,             // message string when in the ended view
+};
+const seenIds = new Set();
+const confirmer = views.createConfirm();
+document.body.append(confirmer.dialog);
+
+// ---- toast / status ------------------------------------------------------
+let toastTimer = null;
+function toast(msg) {
+  toastEl.textContent = msg;
+  toastEl.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { toastEl.hidden = true; toastEl.textContent = ''; }, 6000);
+}
+function setStatus(status) {
+  s.connected = status === 'connected';
+  statusEl.hidden = status !== 'reconnecting';
+  statusEl.textContent = status === 'reconnecting' ? 'Reconnecting…' : '';
+}
+
+// ---- state helpers ---------------------------------------------------------
+function resetSessionState() {
+  if (s.conn) { s.conn.close(); s.conn = null; }
+  Object.assign(s, {
+    id: null, welcomed: false, role: null, code: null, name: null, participantId: null,
+    serverState: 'waiting', participants: [], result: null, drawComplete: false,
+    drawPending: false, revealedByHost: false, animateHostReveal: false, boxOpened: false,
+    connected: false,
+  });
+  seenIds.clear();
+  setStatus('connected');
+  statusEl.hidden = true;
+}
+
+function startConnection(ident) {
+  resetSessionState();
+  s.id = ident;
+  s.role = ident.role;
+  s.code = ident.code;
+  s.name = ident.name ?? null;
+  s.screen = 'landing';
+  s.conn = connect({
+    code: ident.code,
+    token: ident.token,
+    onMessage: onMessage,
+    onTerminal: onTerminal,
+    onStatus: (st) => { setStatus(st); render(); },
+  });
+  render();
+}
+
+function endWith(message, { toLanding = false } = {}) {
+  identity.clear();
+  resetSessionState();
+  try { history.replaceState(null, '', '/'); } catch { /* ignore */ }
+  if (toLanding) {
+    s.ended = null;
+    s.screen = 'landing';
+    toast(message);
+  } else if (!s.ended) {
+    s.ended = message;
+  }
+  render();
+}
+
+function onTerminal(code) {
+  const msg = MESSAGES[code] || 'Disconnected from the session.';
+  if (s.ended) { render(); return; } // a more specific message arrived first
+  endWith(msg, { toLanding: code === 4001 || code === 4004 });
+}
+
+// ---- §8.2 server messages (any order) -------------------------------------
+function onMessage(msg) {
+  switch (msg.type) {
+    case 'welcome':
+      s.welcomed = true;
+      s.role = msg.role;
+      s.code = msg.code || s.code;
+      s.participantId = msg.participantId ?? null;
+      s.name = msg.name ?? s.name;
+      s.serverState = msg.state;
+      if (msg.state === 'drawn') s.drawPending = false;
+      break;
+    case 'participants_update':
+      s.participants = Array.isArray(msg.participants) ? msg.participants : [];
+      s.serverState = msg.state;
+      if (msg.state === 'drawn') s.drawPending = false;
+      break;
+    case 'draw_complete':
+      s.serverState = 'drawn';
+      s.drawComplete = true;
+      s.drawPending = false;
+      break;
+    case 'draw_result':
+      // Host: stored only; shown after "Reveal my match". Participant: closed box appears.
+      s.result = { assignedName: msg.assignedName, assignedFunFact: msg.assignedFunFact };
+      s.serverState = 'drawn';
+      s.drawPending = false;
+      break;
+    case 'removed':
+      endWith(MESSAGES[4011]);
+      return;
+    case 'session_closed':
+      endWith(msg.reason === 'ttl' ? 'This session has expired.' : 'The host ended the session.');
+      return;
+    case 'error':
+      s.drawPending = false;
+      toast(msg.message || 'Something went wrong.');
+      break;
+    default:
+      return; // unknown types are ignored
+  }
+  render();
+}
+
+// ---- actions ---------------------------------------------------------------
+function afterAuth({ code, token, role, name }) {
+  const ident = { code, token, role, name };
+  identity.save(ident);
+  try { history.replaceState(null, '', '/?s=' + encodeURIComponent(code)); } catch { /* ignore */ }
+  startConnection(ident);
+}
+
+async function onCreate(body) {
+  const r = await api.createSession(body);
+  afterAuth({ code: r.code, token: r.hostToken, role: 'host', name: body.participate === false ? null : String(body.name).trim() });
+}
+async function onJoin(code, body) {
+  const r = await api.joinSession(code, body);
+  afterAuth({ code: r.code, token: r.token, role: 'participant', name: String(body.name).trim() });
+}
+
+async function copyLink() {
+  const link = location.origin + '/?s=' + s.code;
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(link);
+      toast('Link copied.');
+      return;
+    }
+  } catch { /* fall through */ }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = link;
+    ta.className = 'offscreen';
+    ta.setAttribute('readonly', '');
+    document.body.append(ta);
+    ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    if (ok) { toast('Link copied.'); return; }
+  } catch { /* fall through */ }
+  toast('Copy this link: ' + link);
+}
+
+async function onDraw() {
+  const n = s.participants.length;
+  const ok = await confirmer.ask(`Draw for ${n} people?`, 'No one else can join after this.', 'Draw');
+  if (!ok || s.serverState !== 'waiting' || s.drawPending) return;
+  if (s.conn && s.conn.send({ type: 'start_draw' })) {
+    s.drawPending = true;
+    render();
+  } else {
+    toast('Not connected. Try again in a moment.');
+  }
+}
+async function onEnd() {
+  const ok = await confirmer.ask('End this session?', 'Everyone will be disconnected and the draw is lost.', 'End session');
+  if (ok && s.conn) s.conn.send({ type: 'close_session' });
+}
+function onRemove(id) {
+  if (s.conn) s.conn.send({ type: 'remove_participant', id });
+}
+function backToStart() {
+  s.ended = null;
+  s.screen = 'landing';
+  s.joinCode = '';
+  try { history.replaceState(null, '', '/'); } catch { /* ignore */ }
+  render();
+}
+
+// ---- render ----------------------------------------------------------------
+function currentView() {
+  if (s.ended) return views.renderEnded({ message: s.ended, onBack: backToStart });
+
+  if (s.id) {
+    if (!s.welcomed) return views.renderConnecting();
+    if (s.role === 'host') {
+      const node = views.renderHostRoom({
+        code: s.code,
+        participants: s.participants,
+        drawn: s.serverState === 'drawn' || s.drawComplete,
+        drawPending: s.drawPending,
+        connected: s.connected,
+        participates: s.participantId !== null,
+        hostResult: s.result,
+        revealedByHost: s.revealedByHost,
+        animateHostReveal: s.animateHostReveal,
+        seenIds,
+        onCopy: copyLink,
+        onDraw,
+        onEnd,
+        onRemove,
+        onRevealHost: () => { s.revealedByHost = true; s.animateHostReveal = true; render(); },
+        onHideHost: () => { s.revealedByHost = false; s.animateHostReveal = false; render(); },
+      });
+      s.animateHostReveal = false;
+      for (const p of s.participants) seenIds.add(p.id);
+      return node;
+    }
+    if (s.result) {
+      return views.renderReveal({ result: s.result, boxOpened: s.boxOpened, onOpened: () => { s.boxOpened = true; } });
+    }
+    return views.renderWaiting({ name: s.name, code: s.code });
+  }
+
+  if (s.screen === 'hostCreate') {
+    return views.renderHostCreate({ onCreate, onBack: backToStart });
+  }
+  if (s.screen === 'join') {
+    return views.renderJoin({ code: s.joinCode, onJoin, onBack: backToStart });
+  }
+  return views.renderLanding({
+    remembered: identity.loadRemembered(),
+    onHost: () => { s.screen = 'hostCreate'; render(); },
+    onParticipant: () => { s.screen = 'join'; render(); },
+    onContinue: () => {
+      const r = identity.loadRemembered();
+      if (!r) { render(); return; }
+      identity.save(r); // copy into sessionStorage for this tab
+      try { history.replaceState(null, '', '/?s=' + encodeURIComponent(r.code)); } catch { /* ignore */ }
+      startConnection(r);
+    },
+    onFresh: () => { identity.clear(); render(); },
+  });
+}
+
+function render() {
+  const view = currentView();
+  app.replaceChildren(view);
+}
+
+// ---- bootstrap (§8.3) ------------------------------------------------------
+(function boot() {
+  let urlCode = '';
+  try { urlCode = (new URLSearchParams(location.search).get('s') || '').trim().slice(0, 14); } catch { /* ignore */ }
+
+  const sess = identity.loadSession();
+  if (sess) { startConnection(sess); return; }
+
+  if (urlCode) {
+    s.screen = 'join';
+    s.joinCode = urlCode;
+  }
+  render();
+})();

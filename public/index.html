@@ -3,11 +3,15 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
   <title>Secret Santa</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
+  <div class="snow" aria-hidden="true"></div>
+  <div id="conn-status" class="conn-status" role="status" aria-live="polite" hidden></div>
   <main id="app"></main>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
   <script src="vendor/confetti.browser.min.js"></script>
   <script type="module" src="js/main.js"></script>
 </body>

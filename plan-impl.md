@@ -20,6 +20,7 @@ authoritative** for technical detail.
 | D7 | After authenticating, the server sends `welcome { role, state, ... }` | One message for the client to start from, replacing `waiting`/`joined_ack`. |
 | D8 | Timers are injected into `store`; tests use a hand-written fake timer | Independent of how `mock.timers` behaves in a given Node version, and fully deterministic. |
 | D9 | Strict CSP, with no inline script or style | Defense in depth for the one real threat, XSS through names and fun facts. |
+| D10 | Sessions are optionally persisted to SQLite (`node:sqlite`, built into Node 24) via a listener on `store`'s existing events, not by making `store` do I/O | Keeps `store` synchronous and I/O-free (D5) so it stays unit-testable; persistence is a separate module (`persist.js`) the store doesn't know about. |
 
 ---
 
@@ -42,6 +43,7 @@ secret_santa/
 │   ├── codes.js                 # session code + token + id generation
 │   ├── draw.js                  # uniform single-cycle assignment (pure)
 │   ├── store.js                 # session state machine (pure, sync, event-emitting)
+│   ├── persist.js               # SQLite mirror of store sessions, for restart survival
 │   ├── hub.js                   # WebSocket server: auth, registry, fan-out, heartbeat
 │   ├── http.js                  # Express app: routes, security headers, static
 │   ├── app.js                   # createApp(): wires store + http + hub onto one http.Server
@@ -68,6 +70,7 @@ secret_santa/
     ├── validate.test.js
     ├── draw.test.js
     ├── store.test.js
+    ├── persist.test.js
     ├── http.test.js
     ├── ws.test.js
     └── e2e/
@@ -75,7 +78,8 @@ secret_santa/
 ```
 
 **Dependency rule:** `draw`, `validate`, `codes`, and `errors` are leaves.
-`store` depends only on those. `hub` and `http` depend on `store`. `app`
+`store` depends only on those. `hub` and `http` depend on `store`. `persist`
+depends only on `store`'s public API (`on`, `exportSession`). `app`
 depends on everything. Nothing in `src/` imports from `public/` or `test/`.
 
 ---
@@ -121,6 +125,7 @@ browser build is committed under `public/vendor/`.
 | `HEARTBEAT_MS` | `30000` | WS ping interval |
 | `AUTH_TIMEOUT_MS` | `5000` | Time allowed for the first `auth` message |
 | `LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error` |
+| `DB_PATH` | unset | SQLite file for session persistence. Unset disables persistence: sessions live in memory only, as before. |
 
 `loadConfig(env = process.env)` parses the values, checks they're positive
 integers, and returns `Object.freeze({...})`. An invalid value fails fast at
@@ -287,6 +292,8 @@ change is complete.
 | `on(listener)` | – | – | Subscribes. → `unsubscribe()` | |
 | `size()` | – | – | Number of live sessions (for tests and `/healthz`) | |
 | `dispose()` | – | – | Clears all timers and sessions (for tests and shutdown) | |
+| `exportSession(code)` | – | any | → full session snapshot (tokens, `assignedTo` included) for `persist.js`, or `null` | |
+| `restoreSessions(list)` | – | – | Rehydrates sessions from snapshots at startup, arming a timer for the *remaining* TTL. → `{ restored: string[], expired: string[] }`; a session whose TTL elapsed while the process was down is skipped, not extended | |
 
 `hostView`, `resultFor` and `participantName` don't check authorization
 themselves. Only `hub` calls them, and only for a socket that has already
@@ -327,6 +334,7 @@ must say so.
 ### 6.5 Events
 
 ```js
+{ type: 'created', code }
 { type: 'participants_changed', code }
 { type: 'removed',  code, participantId }
 { type: 'drawn',    code }
@@ -342,6 +350,42 @@ listener that throws is caught and logged, so it can't break the store.
 `.unref?.()` on the handle so the timer never keeps the process alive. `expire`
 deletes the session and emits `closed { reason: 'ttl' }`. `close` and
 `dispose` call `clearTimeout`.
+
+### 6.7 `src/persist.js` — surviving a restart (optional)
+
+```js
+export function createPersistence({ dbPath, store, log }) → {
+  loadAll(),            // → snapshot[] for store.restoreSessions()
+  removeSession(code),  // used by app.js to drop a session that expired while down
+  close(),              // unsubscribes from store and closes the DB handle
+}
+```
+
+Only created when `config.DB_PATH` is set (§3); otherwise sessions are
+memory-only, exactly as before this feature existed. It's a plain listener on
+`store.on(...)`, so `store` itself stays synchronous and I/O-free (D5, D10):
+
+| Store event | Action |
+|---|---|
+| `created`, `participants_changed`, `removed`, `drawn` | `store.exportSession(code)`, then upsert that session's row and fully replace its participant rows, inside one transaction |
+| `closed` | Delete the session's row and participant rows |
+
+Uses `node:sqlite` (`DatabaseSync`, built into Node 24, no new dependency),
+with two tables, `sessions` and `participants` (one row per participant, with
+a `seq` column to preserve join order). Writes are synchronous and
+transactional (`BEGIN`/`COMMIT`/`ROLLBACK`), so a session's row is never left
+half-written. A write that fails is logged (`persist_failed`) and the
+in-memory store is unaffected — persistence is a mirror, never a dependency
+of correctness while the process is up.
+
+**Startup (`app.js`):** if `config.DB_PATH` is set, `createPersistence(...)`
+is constructed right after `store`, then `store.restoreSessions(persistence.loadAll())`
+runs before `listen()`. Sessions reported as `expired` (TTL elapsed while the
+process was down) are removed from the DB via `persistence.removeSession`.
+`app.close()` calls `persistence.close()`.
+
+Since the DB holds tokens in plaintext, `DB_PATH` must point at a volume no
+one else can read; see §12.
 
 ---
 
@@ -729,6 +773,24 @@ restarting the server.
 - `dispose` leaves `size()` at 0 and `pending()` at 0.
 - A listener that throws doesn't stop other listeners from running.
 
+### 11.2.1 `persist.test.js`
+
+Uses a real SQLite file in a temp directory (`fs.mkdtempSync`), never
+`:memory:`, since the point is surviving a process restart.
+
+- `created`/`participants_changed`/`removed`/`drawn` each mirror the full
+  session (including tokens and `assignedTo`) into SQLite; `closed` deletes it.
+- TTL expiry (via `fakeTimers`) also deletes the session from SQLite.
+- A second `createStore` + `createPersistence` pointed at the same file
+  restores a session via `restoreSessions(persistence.loadAll())`, with
+  `authenticate`, `resultFor`, and `hostView` all matching the pre-restart
+  store.
+- Full app-level restart: `startTestServer({ DB_PATH })`, create/join/draw
+  over real HTTP/WS, `app.close()` (simulating a crash — no `closed` event),
+  then a second `startTestServer({ DB_PATH })` against the same file. A
+  participant's and the host's `draw_result` after reconnecting match what
+  they got before the restart.
+
 ### 11.3 Integration tests
 
 **`http.test.js`**
@@ -867,12 +929,26 @@ services:
     ports: ["81:3000"]
     restart: unless-stopped
     init: true                  # proper PID 1 signal forwarding / zombie reaping
-    read_only: true             # app never writes to disk
+    read_only: true             # app only writes to the /data volume below
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     environment:
       SESSION_TTL_MIN: "120"
+      DB_PATH: "/data/sessions.db"
+    volumes:
+      - santa-data:/data
+
+volumes:
+  santa-data:
 ```
+
+The Dockerfile creates `/data`, `chown`s it to the `node` user (the one the
+container runs as, under `read_only: true`), and declares it a `VOLUME` so it
+survives `docker compose restart`/`up` even without the named volume above.
+`DB_PATH` holds session tokens in plaintext (D10) — acceptable here since
+this is a single-purpose, short-lived app taken down after the event, but
+that's a real tradeoff, not a non-issue, if this code is ever reused for
+something with a real threat model. Don't back up or publish the volume.
 
 **`.dockerignore`**: `node_modules`, `.git`, `test/e2e`, `*.md`, `.env*`.
 
@@ -895,7 +971,8 @@ than 60 s (heartbeats every 30 s keep them alive).
 | 7 | `reveal.js`, CSS, animations, `prefers-reduced-motion` | Works on a phone-sized viewport |
 | 8 | Playwright E2E | `npm run test:all` is green |
 | 9 | Dockerfile + compose | `docker build --target test .` passes, and `/healthz` is OK through port 81 |
-| 10 | Pre-event checklist (`plan.md`) on the real server | Dry run done from a second machine and a phone |
+| 10 | `persist.js` + `DB_PATH` wiring + `persist.test.js` | §11.2.1 is green, and a session survives `docker compose restart` with the `/data` volume mounted |
+| 11 | Pre-event checklist (`plan.md`) on the real server | Dry run done from a second machine and a phone |
 
 **Definition of done for v1:** steps 1–9 are green, and no log line contains a
 name, token, or assignment (spot-check `docker logs` after the dry run).

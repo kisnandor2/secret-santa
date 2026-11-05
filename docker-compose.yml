@@ -7,8 +7,14 @@ services:
     ports: ["${HOST_BIND:-0.0.0.0}:${HOST_PORT:-81}:3000"]
     restart: unless-stopped
     init: true                  # proper PID 1 signal forwarding / zombie reaping
-    read_only: true             # app never writes to disk
+    read_only: true             # app only writes to the /data volume below
     cap_drop: [ALL]
     security_opt: ["no-new-privileges:true"]
     environment:
       SESSION_TTL_MIN: "120"
+      DB_PATH: "/data/sessions.db"
+    volumes:
+      - santa-data:/data
+
+volumes:
+  santa-data:

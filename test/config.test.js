@@ -6,7 +6,7 @@ describe('config', () => {
   it('defaults', () => {
     assert.deepEqual(loadConfig({}), {
       PORT: 3000, SESSION_TTL_MIN: 120, MAX_SESSIONS: 20, MAX_PARTICIPANTS: 50,
-      HEARTBEAT_MS: 30000, AUTH_TIMEOUT_MS: 5000, LOG_LEVEL: 'info',
+      HEARTBEAT_MS: 30000, AUTH_TIMEOUT_MS: 5000, LOG_LEVEL: 'info', DB_PATH: null,
     });
   });
   it('is frozen', () => {
@@ -38,5 +38,9 @@ describe('config', () => {
   });
   it('reads process.env by default', () => {
     assert.equal(typeof loadConfig().PORT, 'number');
+  });
+  it('DB_PATH is null unless set, otherwise passed through as a string', () => {
+    assert.equal(loadConfig({}).DB_PATH, null);
+    assert.equal(loadConfig({ DB_PATH: '/data/sessions.db' }).DB_PATH, '/data/sessions.db');
   });
 });

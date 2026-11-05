@@ -116,7 +116,10 @@ describe('store', () => {
     const out = store.join(r.c, person('Bob', 'bf'));
     assert.ok(out.participantId && out.token);
     assert.notEqual(out.token, r.hostToken);
-    assert.deepEqual(events, [{ type: 'participants_changed', code: r.c }]);
+    assert.deepEqual(events, [
+      { type: 'created', code: r.c },
+      { type: 'participants_changed', code: r.c },
+    ]);
     assert.equal(store.participantName(r.c, out.participantId), 'Bob');
     assert.deepEqual(store.authenticate(r.c, out.token), { role: 'participant', participantId: out.participantId });
   });
@@ -418,6 +421,7 @@ describe('store', () => {
     room(store);
     room(store, { participate: false });
     assert.equal(timers.pending(), 2);
+    events.length = 0;
     store.dispose();
     assert.equal(store.size(), 0);
     assert.equal(timers.pending(), 0);
@@ -432,8 +436,8 @@ describe('store', () => {
     store.on((e) => seen.push(e.type));
     const r = room(store);
     store.join(r.c, person('Bob'));
-    assert.deepEqual(seen, ['participants_changed']);
-    assert.equal(listenerErrors.length, 1);
+    assert.deepEqual(seen, ['created', 'participants_changed']);
+    assert.equal(listenerErrors.length, 2);
     assert.equal(listenerErrors[0].message, 'boom');
     assert.equal(store.hostView(r.c).participants.length, 2);
   });
@@ -443,6 +447,7 @@ describe('store', () => {
     const seen = [];
     const off = store.on((e) => seen.push(e));
     const r = room(store);
+    seen.length = 0;
     off();
     store.join(r.c, person('Bob'));
     assert.deepEqual(seen, []);
@@ -455,6 +460,53 @@ describe('store', () => {
     assert.equal(store.size(), 1);
     store.dispose();
     assert.equal(store.size(), 0);
+  });
+
+  it('exportSession returns full state including tokens and assignments, or null', () => {
+    const store = make();
+    assert.equal(store.exportSession('NOPE-123'), null);
+    const r = room(store, { names: ['Bob', 'Cy'] });
+    store.draw(r.c, r.hostToken);
+    const snap = store.exportSession(r.c);
+    assert.equal(snap.code, r.c);
+    assert.equal(snap.hostToken, r.hostToken);
+    assert.equal(snap.state, 'drawn');
+    assert.equal(snap.participants.length, 3);
+    assert.ok(snap.participants.every((p) => typeof p.token === 'string' && p.assignedTo));
+  });
+
+  it('restoreSessions rehydrates sessions and arms timers for the remaining TTL', () => {
+    const store = make();
+    const r = room(store, { names: ['Bob', 'Cy'] });
+    store.draw(r.c, r.hostToken);
+    const snap = store.exportSession(r.c);
+    timers.advance(TTL / 2);
+
+    const fresh = make();
+    const { restored, expired } = fresh.restoreSessions([snap]);
+    assert.deepEqual(restored, [r.c]);
+    assert.deepEqual(expired, []);
+    assert.equal(fresh.hostView(r.c).state, 'drawn');
+    assert.deepEqual(fresh.authenticate(r.c, r.hostToken), { role: 'host', participantId: r.hostPid });
+    assert.deepEqual(fresh.resultFor(r.c, r.hostPid), store.resultFor(r.c, r.hostPid));
+
+    timers.advance(TTL / 2 - 1);
+    assert.equal(fresh.size(), 1);
+    timers.advance(1);
+    assert.equal(fresh.size(), 0);
+  });
+
+  it('restoreSessions reports (and skips) a session whose TTL elapsed while down', () => {
+    const store = make();
+    const r = room(store);
+    const snap = store.exportSession(r.c);
+    timers.advance(TTL + 1);
+
+    const fresh = make();
+    const { restored, expired } = fresh.restoreSessions([snap]);
+    assert.deepEqual(restored, []);
+    assert.deepEqual(expired, [r.c]);
+    assert.equal(fresh.size(), 0);
   });
 });
 

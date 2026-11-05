@@ -67,6 +67,7 @@ export function createStore({
     s.timer = timers.setTimeout(() => expire(code), ttlMs);
     s.timer?.unref?.();
     sessions.set(code, s);
+    emit({ type: 'created', code });
     return { code, hostToken, participantId: s.hostParticipantId };
   }
 
@@ -155,8 +156,43 @@ export function createStore({
     sessions.clear();
   }
 
+  // Full session state for persistence, including tokens and assignments.
+  // Unlike hostView/resultFor, this is never sent over the wire.
+  function exportSession(code) {
+    const s = sessions.get(code);
+    if (!s) return null;
+    return {
+      code: s.code, hostToken: s.hostToken, hostParticipantId: s.hostParticipantId,
+      createdAt: s.createdAt, state: s.state,
+      participants: [...s.participants.values()].map((p) => ({ ...p })),
+    };
+  }
+
+  // Rehydrates sessions from persisted snapshots at startup. A session whose TTL
+  // elapsed while the process was down is skipped (and reported as expired, so
+  // the caller can clean it up from storage) rather than silently extended.
+  function restoreSessions(list) {
+    const restored = [];
+    const expired = [];
+    for (const data of list) {
+      const remaining = data.createdAt + ttlMs - now();
+      if (remaining <= 0) { expired.push(data.code); continue; }
+      const participants = new Map(data.participants.map((p) => [p.id, { ...p }]));
+      const s = {
+        code: data.code, hostToken: data.hostToken, hostParticipantId: data.hostParticipantId,
+        createdAt: data.createdAt, state: data.state, participants, timer: null,
+      };
+      s.timer = timers.setTimeout(() => expire(data.code), remaining);
+      s.timer?.unref?.();
+      sessions.set(data.code, s);
+      restored.push(data.code);
+    }
+    return { restored, expired };
+  }
+
   return {
     createSession, join, authenticate, removeParticipant, draw, close,
     hostView, resultFor, participantName, on, size: () => sessions.size, dispose,
+    exportSession, restoreSessions,
   };
 }

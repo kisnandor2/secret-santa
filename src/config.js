@@ -31,5 +31,9 @@ export function loadConfig(env = process.env) {
     throw new Error(`Invalid LOG_LEVEL: ${JSON.stringify(level)} (must be one of ${LEVELS.join(', ')})`);
   }
   cfg.LOG_LEVEL = level;
+
+  // Unset means persistence is disabled: sessions live in memory only, as before.
+  cfg.DB_PATH = env.DB_PATH ? String(env.DB_PATH) : null;
+
   return Object.freeze(cfg);
 }

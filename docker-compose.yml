@@ -2,7 +2,9 @@ services:
   santa:
     build: .
     image: secret-santa:local
-    ports: ["81:3000"]
+    # HOST_PORT: published port (default 81). HOST_BIND=127.0.0.1 exposes it only to a
+    # reverse proxy on the same host. Inside the container the app always listens on 3000.
+    ports: ["${HOST_BIND:-0.0.0.0}:${HOST_PORT:-81}:3000"]
     restart: unless-stopped
     init: true                  # proper PID 1 signal forwarding / zombie reaping
     read_only: true             # app never writes to disk

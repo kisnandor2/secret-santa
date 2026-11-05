@@ -1,7 +1,10 @@
 // Input normalization/validation (pure) — see plan-impl.md §5.1
 import { fail } from './errors.js';
 
-const CONTROL = /[\u0000-\u001F\u007F-\u009F]/;
+// C0/C1 controls, plus invisible and bidi-override characters that would let
+// "Alice​" or "‮ecila" pass as a second, look-alike "Alice".
+// ZWJ/ZWNJ (U+200C/U+200D) stay allowed: emoji sequences need them.
+const CONTROL = /[\u0000-\u001F\u007F-\u009F­؜᠎​‎‏‪-‮⁠-⁤⁦-⁩﻿]/;
 const CODE = /^[A-Z]{3,10}-\d{3}$/;
 
 const clean = (s) => s.normalize('NFC').replace(/\s+/g, ' ').trim();
@@ -28,7 +31,7 @@ export function normalizeCode(raw) {
 
 export function parseName(raw) {
   const name = parseText(raw, 'Name', 1, 40);
-  return { name, nameKey: name.toLocaleLowerCase('und') };
+  return { name, nameKey: name.replace(/[‌‍]/g, '').toLocaleLowerCase('und') };
 }
 
 export function parseFunFact(raw) {

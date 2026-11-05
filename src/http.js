@@ -62,7 +62,7 @@ export function createHttpApp({ store, publicDir, log }) {
     if (err instanceof AppError) {
       return res.status(err.status).json({ error: err.code, message: err.message });
     }
-    if (err.type && err.status >= 400 && err.status < 500) { // body-parser: bad JSON, too large, etc.
+    if (err.status >= 400 && err.status < 500) { // body-parser (bad JSON, too large), bad URL encoding, etc.
       return res.status(400).json({ error: 'INVALID_INPUT', message: 'Request body must be valid JSON under 2 kB.' });
     }
     log.error('http_error', { err });

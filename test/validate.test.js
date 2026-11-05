@@ -37,6 +37,16 @@ describe('validate', () => {
       invalid(() => parseName('a\u0085b'));
       invalid(() => parseName('a\u009Fb'));
     });
+    it('invisible and bidi-override characters rejected (look-alike names)', () => {
+      for (const ch of ['\u200B', '\u200E', '\u202E', '\u2066', '\u2060', '\u00AD']) {
+        invalid(() => parseName(`Al${ch}ice`));
+      }
+      assert.equal(parseName('Al\uFEFFice').name, 'Al ice'); // \s covers U+FEFF: becomes a visible space
+    });
+    it('emoji ZWJ sequences allowed, but ZWJ ignored for uniqueness', () => {
+      assert.equal(parseName('Ann 👩‍🚀').name, 'Ann 👩‍🚀');
+      assert.equal(parseName('Al\u200Dice').nameKey, 'alice');
+    });
     it('non-strings rejected', () => {
       for (const v of [undefined, null, 5, {}, [], true, ['a']]) invalid(() => parseName(v));
     });

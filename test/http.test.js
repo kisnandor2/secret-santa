@@ -130,7 +130,8 @@ describe('http', () => {
   });
 
   it('body over 2 kB gives 400 INVALID_INPUT', async () => {
-    await expectError(await post('/api/sessions', { name: 'A', funFact: 'x'.repeat(3000) }), 400, 'INVALID_INPUT');
+    // otherwise-valid body padded with an ignored field, so only the 2 kB limit can reject it
+    await expectError(await post('/api/sessions', { participate: false, pad: 'x'.repeat(3000) }), 400, 'INVALID_INPUT');
   });
 
   it('api responses have Cache-Control no-store', async () => {
@@ -138,6 +139,10 @@ describe('http', () => {
     assert.equal(ok.headers.get('cache-control'), 'no-store');
     const bad = await post('/api/sessions', {});
     assert.equal(bad.headers.get('cache-control'), 'no-store');
+  });
+
+  it('malformed percent-encoding in the code gives 400, not 500', async () => {
+    await expectError(await post('/api/sessions/%E0%A4%A/join', { name: 'Bob' }), 400, 'INVALID_INPUT');
   });
 
   it('unknown /api path gives 404 JSON', async () => {

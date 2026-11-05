@@ -24,8 +24,11 @@ export function createApp(overrides = {}) {
   const server = http.createServer(createHttpApp({ store, publicDir, log }));
   const hub = createHub({ store, heartbeatMs: config.HEARTBEAT_MS, authTimeoutMs: config.AUTH_TIMEOUT_MS, log });
 
+  // Must never throw: an exception here is uncaught and takes down the process (and every session).
   server.on('upgrade', (req, socket, head) => {
-    if (new URL(req.url, 'http://x').pathname === '/ws') hub.handleUpgrade(req, socket, head);
+    let pathname = null;
+    try { pathname = new URL(req.url, 'http://x').pathname; } catch { /* malformed URL, e.g. "//" */ }
+    if (pathname === '/ws') hub.handleUpgrade(req, socket, head);
     else socket.destroy();
   });
 

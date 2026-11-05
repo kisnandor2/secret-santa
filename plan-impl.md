@@ -376,7 +376,7 @@ the host's own card and lets the same fan-out code deliver the host's result.
 
 ### 7.3 Socket lifecycle
 
-1. **Connection opens.** Start `authTimer = setTimeout(() => ws.close(4001, 'auth timeout'), authTimeoutMs)`.
+1. **Connection opens.** Start `authTimer = setTimeout(() => ws.close(1008, 'auth timeout'), authTimeoutMs)`.
 2. **First message must be** `{ type: 'auth', code, token }`. Otherwise the server closes with `4001`.
    - `normalizeCode` fails or the session doesn't exist → close `4004`.
    - `store.authenticate` returns `null` → close `4001`.
@@ -420,7 +420,8 @@ offline at draw time.
 | Code | Meaning | Client behavior |
 |---|---|---|
 | `1000/1001/1006…` | normal / network / server restart | Reconnect with backoff |
-| `4001` | Auth failed or timed out | Forget identity, go to landing ("Your session link is invalid") |
+| `1008` | Auth timed out (e.g. phone suspended mid-connect) | Reconnect with backoff, keep identity |
+| `4001` | Auth failed | Forget identity, go to landing ("Your session link is invalid") |
 | `4004` | Session not found | Forget identity, go to landing ("Session ended or not found") |
 | `4010` | Session closed (by host or TTL) | Forget identity, show "Session ended" |
 | `4011` | Removed by host | Forget identity, show "The host removed you from this session" |
@@ -604,8 +605,11 @@ export function createApp(overrides = {}) {
   const app    = createHttpApp({ store, publicDir, log });
   const server = http.createServer(app);
   const hub    = createHub({ store, heartbeatMs: config.HEARTBEAT_MS, authTimeoutMs: config.AUTH_TIMEOUT_MS, log });
-  server.on('upgrade', (req, sock, head) =>
-    new URL(req.url, 'http://x').pathname === '/ws' ? hub.handleUpgrade(req, sock, head) : sock.destroy());
+  server.on('upgrade', (req, sock, head) => {   // must never throw: it would crash the process
+    let pathname = null;
+    try { pathname = new URL(req.url, 'http://x').pathname; } catch {}
+    pathname === '/ws' ? hub.handleUpgrade(req, sock, head) : sock.destroy();
+  });
   return {
     server, store, hub,
     listen: (port = config.PORT) => new Promise(r => server.listen(port, () => r(server.address().port))),
@@ -739,7 +743,7 @@ restarting the server.
 
 **`ws.test.js`**
 - **Auth:**
-  - no auth within `AUTH_TIMEOUT_MS` → closed with 4001
+  - no auth within `AUTH_TIMEOUT_MS` → closed with 1008 (retryable)
   - bad token → 4001
   - unknown code → 4004
   - first message not `auth` → 4001

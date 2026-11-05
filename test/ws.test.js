@@ -87,10 +87,10 @@ describe('ws', () => {
   const store = () => srv.app.store;
 
   describe('auth', () => {
-    it('closes 4001 when no auth arrives in time', async () => {
+    it('closes 1008 (retryable, not terminal) when no auth arrives in time', async () => {
       const c = await openSocket(srv.wsUrl);
       const { code } = await c.closed;
-      assert.equal(code, 4001);
+      assert.equal(code, 1008);
     });
 
     it('closes 4001 on a bad token', async () => {

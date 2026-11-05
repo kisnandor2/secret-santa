@@ -3,7 +3,8 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { AppError, fail } from './errors.js';
 import { normalizeCode } from './validate.js';
 
-const CLOSE = Object.freeze({ AUTH: 4001, NOT_FOUND: 4004, SESSION_CLOSED: 4010, REMOVED: 4011 });
+// AUTH_TIMEOUT is deliberately outside 4000–4999 so the client retries instead of discarding its token.
+const CLOSE = Object.freeze({ AUTH_TIMEOUT: 1008, AUTH: 4001, NOT_FOUND: 4004, SESSION_CLOSED: 4010, REMOVED: 4011 });
 
 export function createHub({ store, heartbeatMs, authTimeoutMs, log }) {
   const wss = new WebSocketServer({ noServer: true, maxPayload: 4096, clientTracking: true });
@@ -148,7 +149,7 @@ export function createHub({ store, heartbeatMs, authTimeoutMs, log }) {
 
   wss.on('connection', (ws) => {
     ws.ctx = { code: null, token: null, role: null, participantId: null, alive: true, authed: false, terminal: false, authTimer: null };
-    ws.ctx.authTimer = setTimeout(() => endSocket(ws, CLOSE.AUTH, 'auth timeout'), authTimeoutMs);
+    ws.ctx.authTimer = setTimeout(() => endSocket(ws, CLOSE.AUTH_TIMEOUT, 'auth timeout'), authTimeoutMs);
     ws.on('pong', () => { ws.ctx.alive = true; });
     ws.on('message', (data, isBinary) => onMessage(ws, data, isBinary));
     ws.on('close', () => onClose(ws));

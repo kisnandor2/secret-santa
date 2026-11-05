@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { createStore } from '../src/store.js';
 import { createPersistence } from '../src/persist.js';
 import { silentLog } from '../src/log.js';
@@ -106,6 +107,48 @@ describe('persist', () => {
     persistence2.close();
   });
 
+  it('multiple sessions in one DB file persist and restore independently', () => {
+    const timers = fakeTimers();
+    const store = makeStore(timers);
+    const persistence = createPersistence({ dbPath, store, log: silentLog });
+
+    const a = store.createSession({ participate: true, ...person('HostA', 'ha') });
+    store.join(a.code, person('Bob', 'bf'));
+    store.join(a.code, person('Cy', 'cf'));
+    store.draw(a.code, a.hostToken);
+
+    const b = store.createSession({ participate: true, ...person('HostB', 'hb') });
+    store.join(b.code, person('Dee', 'df'));
+    store.join(b.code, person('Eve', 'ef'));
+
+    let rows = persistence.loadAll();
+    assert.equal(rows.length, 2);
+    const rowA = rows.find((r) => r.code === a.code);
+    const rowB = rows.find((r) => r.code === b.code);
+    assert.equal(rowA.state, 'drawn');
+    assert.equal(rowB.state, 'waiting');
+    assert.deepEqual(rowA.participants.map((p) => p.name).sort(), ['Bob', 'Cy', 'HostA']);
+    assert.deepEqual(rowB.participants.map((p) => p.name).sort(), ['Dee', 'Eve', 'HostB']);
+
+    // closing one session must not touch the other's rows
+    store.close(a.code, a.hostToken);
+    rows = persistence.loadAll();
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].code, b.code);
+
+    persistence.close();
+
+    // restore into a fresh store: only b's rows are left to restore
+    const timers2 = fakeTimers();
+    const store2 = makeStore(timers2);
+    const persistence2 = createPersistence({ dbPath, store: store2, log: silentLog });
+    const { restored, expired } = store2.restoreSessions(persistence2.loadAll());
+    assert.deepEqual(restored, [b.code]);
+    assert.deepEqual(expired, []);
+    assert.equal(store2.hostView(b.code).participants.length, 3);
+    persistence2.close();
+  });
+
   it('a session survives a full app restart against the same DB_PATH', async () => {
     const serverA = await startTestServer({ DB_PATH: dbPath });
     const created = await createSession(serverA.base, { name: 'Host', funFact: 'hf' });
@@ -139,6 +182,31 @@ describe('persist', () => {
       const hostResult = await hostWs2.next('draw_result');
       assert.equal(hostResult.assignedName, expectedResult.assignedName);
       await hostWs2.close();
+    } finally {
+      await serverB.close();
+    }
+  });
+
+  it('app.js removes from the DB a session whose TTL elapsed while the process was down', async () => {
+    const serverA = await startTestServer({ DB_PATH: dbPath });
+    const created = await createSession(serverA.base, { participate: false });
+    const { code } = created.body;
+    await serverA.app.close();
+
+    // Simulate the session's TTL having elapsed while nothing was running.
+    const db = new DatabaseSync(dbPath);
+    db.prepare('UPDATE sessions SET created_at = ? WHERE code = ?').run(Date.now() - 999_000_000, code);
+    db.close();
+
+    const serverB = await startTestServer({ DB_PATH: dbPath });
+    try {
+      assert.equal(serverB.app.store.size(), 0);
+      assert.equal(serverB.app.persistence.loadAll().length, 0);
+
+      const res = await fetch(`${serverB.base}/api/sessions/${code}/join`, {
+        method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name: 'Bob' }),
+      });
+      assert.equal(res.status, 404);
     } finally {
       await serverB.close();
     }

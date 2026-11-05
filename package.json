@@ -2,7 +2,9 @@
   "name": "secret-santa",
   "private": true,
   "type": "module",
-  "engines": { "node": ">=24" },
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
     "start": "node server.js",
     "test": "node --test --test-reporter=spec 'test/*.test.js'",
@@ -14,6 +16,7 @@
     "ws": "^8.18.0"
   },
   "devDependencies": {
+    "canvas-confetti": "1.9.3",
     "playwright": "^1.48.0"
   }
 }

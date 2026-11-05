@@ -1,12 +1,16 @@
 // Browser end-to-end tests — see plan-impl.md §11.5
 import { test, before, after, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { chromium } from 'playwright';
 import { startTestServer } from '../helpers/server.js';
 
 const XSS_NAME = '<img src=x onerror=window.__xss=1>';
 let server;
 let browser;
+let dbDir;
 const contexts = [];
 
 async function launch() {
@@ -23,7 +27,8 @@ async function launch() {
 }
 
 before(async () => {
-  server = await startTestServer({ MAX_SESSIONS: 1000 });
+  dbDir = fs.mkdtempSync(path.join(os.tmpdir(), 'santa-e2e-'));
+  server = await startTestServer({ MAX_SESSIONS: 1000, DB_PATH: path.join(dbDir, 'sessions.db') });
   browser = await launch();
 });
 
@@ -34,6 +39,7 @@ afterEach(async () => {
 after(async () => {
   await browser?.close();
   await server?.close();
+  if (dbDir) fs.rmSync(dbDir, { recursive: true, force: true });
 });
 
 /** New isolated context + page, with error collection. */
@@ -249,4 +255,119 @@ test('reopening the share link after the tab was dropped offers to continue', { 
   await host.page.getByText('2 people joined').waitFor();
 
   await assertClean([host, alice]);
+});
+
+async function endSession(host) {
+  await host.page.getByRole('button', { name: 'End session' }).click();
+  const dlg = host.page.locator('dialog.dlg');
+  await dlg.waitFor({ state: 'visible' });
+  await dlg.getByRole('button', { name: 'End session', exact: true }).click();
+  await host.page.getByText('The host ended the session.').waitFor();
+}
+
+/** Open the gift on the archived-result view and return the assigned name. */
+async function openArchivedGift(person) {
+  const { page } = person;
+  const gift = page.locator('.view-reveal .gift');
+  await gift.waitFor();
+  await gift.click({ force: true });
+  const nameEl = page.locator('.view-reveal .reveal-name');
+  await nameEl.waitFor({ state: 'visible' });
+  return nameEl.textContent();
+}
+
+test('closed session: a participant still on the reveal view keeps their open gift', { timeout: 30000 }, async () => {
+  const host = await newPerson('host');
+  const people = [await newPerson('p1'), await newPerson('p2')];
+  const code = await hostCreate(host, { name: 'Hosty' });
+  await join(people[0], code, 'Alice', 'a');
+  await join(people[1], code, 'Bob', 'b');
+
+  await hostDraw(host, 3);
+  const aliceMatch = await openGift(people[0]);
+  await endSession(host);
+
+  // Alice's own tab is still open on the reveal view when the session closes;
+  // it should not be bounced to a plain "session ended" screen, and the gift
+  // she already tapped open should not re-close.
+  await people[0].page.getByText('The host ended the session.').waitFor();
+  const nameAfterClose = people[0].page.locator('.view-reveal .reveal-name');
+  await nameAfterClose.waitFor({ state: 'visible' });
+  assert.equal(await nameAfterClose.textContent(), aliceMatch);
+
+  await assertClean([host, ...people]);
+});
+
+test('closed session: reloading the same tab resumes into the archived result, not "session ended"', { timeout: 30000 }, async () => {
+  const host = await newPerson('host');
+  const people = [await newPerson('p1'), await newPerson('p2')];
+  const code = await hostCreate(host, { name: 'Hosty' });
+  await join(people[0], code, 'Alice', 'a');
+  await join(people[1], code, 'Bob', 'b');
+
+  await hostDraw(host, 3);
+  const aliceMatch = await openGift(people[0]);
+  await endSession(host);
+  await people[0].page.getByText('The host ended the session.').waitFor();
+
+  // sessionStorage survives a same-tab reload, so this goes through
+  // auto-resume (boot() -> startConnection), which fails with a WS 4004
+  // ("session not found", since the closed session's live rows are gone) --
+  // that path must also fall back to the archive instead of just clearing
+  // identity and showing a dead end.
+  await people[0].page.reload();
+  await people[0].page.getByText('Session ended or not found.').waitFor();
+  assert.equal(await openArchivedGift(people[0]), aliceMatch);
+
+  await assertClean([host, ...people]);
+});
+
+test('closed session: reopening a dropped tab offers Continue, which shows the archived result', { timeout: 30000 }, async () => {
+  const host = await newPerson('host');
+  const people = [await newPerson('p1'), await newPerson('p2')];
+  const code = await hostCreate(host, { name: 'Hosty' });
+  await join(people[0], code, 'Alice', 'a');
+  await join(people[1], code, 'Bob', 'b');
+
+  await hostDraw(host, 3);
+  const aliceMatch = await openGift(people[0]);
+  await endSession(host);
+  await people[0].page.getByText('The host ended the session.').waitFor();
+
+  // A new tab in the same browser: sessionStorage is empty, localStorage
+  // still remembers Alice, same as "reopening the share link" above.
+  await people[0].page.close();
+  const page = await people[0].context.newPage();
+  page.setDefaultTimeout(8000);
+  page.on('pageerror', (e) => people[0].errors.push(`[alice-2] pageerror: ${e.message}`));
+  people[0].page = page;
+  await page.goto(`${server.base}/?s=${encodeURIComponent(code)}`);
+
+  await page.getByText(`Continue as Alice (${code})?`).waitFor();
+  await page.getByRole('button', { name: 'Continue', exact: true }).click();
+  await page.getByText("The draw is done! Here's your match.").waitFor();
+  assert.equal(await openArchivedGift(people[0]), aliceMatch);
+
+  await assertClean([host, ...people]);
+});
+
+test('closed session: a brand new visitor with no identity gets a plain "session ended"', { timeout: 30000 }, async () => {
+  const host = await newPerson('host');
+  const people = [await newPerson('p1'), await newPerson('p2')];
+  const code = await hostCreate(host, { name: 'Hosty' });
+  await join(people[0], code, 'Alice', 'a');
+  await join(people[1], code, 'Bob', 'b');
+  await hostDraw(host, 3);
+
+  await host.page.getByRole('button', { name: 'End session' }).click();
+  const dlg = host.page.locator('dialog.dlg');
+  await dlg.waitFor({ state: 'visible' });
+  await dlg.getByRole('button', { name: 'End session', exact: true }).click();
+  await host.page.getByText('The host ended the session.').waitFor();
+
+  const stranger = await newPerson('stranger');
+  await stranger.page.goto(`${server.base}/?s=${encodeURIComponent(code)}`);
+  await stranger.page.getByRole('button', { name: 'Join', exact: true }).waitFor();
+
+  await assertClean([host, ...people, stranger]);
 });

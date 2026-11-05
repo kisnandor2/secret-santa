@@ -593,11 +593,17 @@ The value stored is `{ code, token, role, name }`.
      with the code filled in. The host's screen shows this link and a
      "Copy link" button.
 - A terminal close code (4xxx) clears both storages — **except** `4010`
-  (`session_closed`): the client checks `GET /api/sessions/:code/result`
-  (§6.8) first, and only clears storage if that comes back empty. If it
-  returns a result, the identity is kept so "Continue" can show it again
-  later; `2.` above (the "Continue" banner) does the same archive check
-  before attempting a live reconnect, for exactly this reason.
+  (`session_closed`) and, when an identity is in play, `4004` ("session not
+  found"): both check `GET /api/sessions/:code/result` (§6.8) first, and
+  only clear storage if that comes back empty. `4010` is what a socket still
+  open when the host closes gets; `4004` is what a **same-tab reload**
+  afterward gets instead, since `sessionStorage` survives a reload and
+  auto-resume (`1.` above) tries to reconnect to a session that's now gone —
+  so that path needs the same fallback, not just the message handler. If a
+  result comes back on either path, the identity is kept so "Continue" can
+  show it again later; `2.` above (the "Continue" banner, reached once
+  `sessionStorage` is actually gone, e.g. the tab was closed) does the same
+  archive check before attempting a live reconnect, for exactly this reason.
 
 All storage access is wrapped in try/catch. If storage isn't available, the
 app still works, just without resuming.
@@ -960,6 +966,21 @@ Run with `npx playwright install chromium` once, then `npm run test:e2e`.
     clicked, then it is.
 - Reload one participant page. The same name is shown, with no new draw.
 - In every context, `window.__xss` is undefined.
+- The shared test server runs with `DB_PATH` set (a temp sqlite file), so the
+  archive path (§6.8) is actually exercised, not silently disabled.
+- **Closed-session archive, three distinct ways back to the same result:**
+  - A participant still on the reveal view when the host ends the session
+    sees `session_closed` directly: the message changes, the gift she
+    already tapped open stays open, same name.
+  - Reloading that same tab afterward goes through auto-resume
+    (`sessionStorage` survives a reload) and gets a WS `4004` against the
+    now-gone live session; `onTerminal`'s 4004 branch falls back to the
+    archive instead of the plain "Session ended or not found." dead end.
+  - Closing the tab and reopening the share link (`sessionStorage` gone,
+    `localStorage` remains) shows the "Continue as Alice?" banner; Continue
+    checks the archive before attempting a live reconnect.
+  - A stranger with no identity at all hitting the same link after close
+    just gets the ordinary join form (404s quietly, no console errors).
 
 ### 11.6 Docker test stage
 

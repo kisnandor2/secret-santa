@@ -103,6 +103,22 @@ function endWith(message, { toLanding = false } = {}) {
 function onTerminal(code) {
   const msg = MESSAGES[code] || 'Disconnected from the session.';
   if (s.ended) { render(); return; } // a more specific message arrived first
+  // 4004 ("session not found") is also what a same-tab reload gets from
+  // auto-resume (sessionStorage survives a reload) once the session has
+  // closed and its live rows are gone: check the archive before giving up,
+  // same as the 'session_closed' message and the "Continue" banner do.
+  if (code === 4004 && s.id) {
+    const ident = s.id;
+    api.getArchivedResult(ident.code, ident.token).then((result) => {
+      if (!result) { endWith(msg, { toLanding: true }); return; }
+      resetSessionState();
+      try { history.replaceState(null, '', '/'); } catch { /* ignore */ }
+      s.ended = msg;
+      s.endedResult = result;
+      render();
+    });
+    return;
+  }
   endWith(msg, { toLanding: code === 4001 || code === 4004 });
 }
 
@@ -141,11 +157,13 @@ function onMessage(msg) {
       if (s.ended) return; // a more specific message arrived first
       const code = s.code;
       const token = s.id?.token;
+      const wasBoxOpened = s.boxOpened; // don't re-close a gift the participant already tapped open
       const message = msg.reason === 'ttl' ? 'This session has expired.' : 'The host ended the session.';
       // Set synchronously: the WS 'close' (4010) that follows this message is a
       // no-op once s.ended is set (see onTerminal's guard), so it can't race us.
       s.ended = message;
       resetSessionState();
+      s.boxOpened = wasBoxOpened;
       try { history.replaceState(null, '', '/'); } catch { /* ignore */ }
       render();
       api.getArchivedResult(code, token).then((result) => {

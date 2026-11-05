@@ -115,7 +115,7 @@ function onMessage(msg) {
       s.participantId = msg.participantId ?? null;
       s.name = msg.name ?? s.name;
       s.serverState = msg.state;
-      if (msg.state === 'drawn') s.drawPending = false;
+      s.drawPending = false; // a start_draw sent on a previous socket may never have arrived
       break;
     case 'participants_update':
       s.participants = Array.isArray(msg.participants) ? msg.participants : [];
@@ -193,6 +193,10 @@ async function onDraw() {
   const n = s.participants.length;
   const ok = await confirmer.ask(`Draw for ${n} people?`, 'No one else can join after this.', 'Draw');
   if (!ok || s.serverState !== 'waiting' || s.drawPending) return;
+  if (s.participants.length !== n) {
+    toast('The participant list changed. Check it and press Draw again.');
+    return;
+  }
   if (s.conn && s.conn.send({ type: 'start_draw' })) {
     s.drawPending = true;
     render();
@@ -202,10 +206,10 @@ async function onDraw() {
 }
 async function onEnd() {
   const ok = await confirmer.ask('End this session?', 'Everyone will be disconnected and the draw is lost.', 'End session');
-  if (ok && s.conn) s.conn.send({ type: 'close_session' });
+  if (ok && !(s.conn && s.conn.send({ type: 'close_session' }))) toast('Not connected. Try again in a moment.');
 }
 function onRemove(id) {
-  if (s.conn) s.conn.send({ type: 'remove_participant', id });
+  if (!(s.conn && s.conn.send({ type: 'remove_participant', id }))) toast('Not connected. Try again in a moment.');
 }
 function backToStart() {
   s.ended = null;
@@ -285,8 +289,8 @@ function render() {
   if (sess) { startConnection(sess); return; }
 
   if (urlCode) {
-    s.screen = 'join';
-    s.joinCode = urlCode;
+    s.joinCode = urlCode; // prefilled if they pick Participant
+    if (!identity.loadRemembered()) s.screen = 'join';
   }
   render();
 })();

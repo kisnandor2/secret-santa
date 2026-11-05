@@ -226,3 +226,26 @@ test('host reload before the draw resumes identity and list', { timeout: 30000 }
 
   await assertClean([host, ...people]);
 });
+
+test('reopening the share link after the tab was dropped offers to continue', { timeout: 30000 }, async () => {
+  const host = await newPerson('host');
+  const alice = await newPerson('alice');
+  const code = await hostCreate(host, { name: 'Hosty' });
+  await join(alice, code, 'Alice', 'a');
+
+  // A new tab in the same browser: sessionStorage is empty, localStorage still remembers Alice.
+  await alice.page.close();
+  const page = await alice.context.newPage();
+  page.setDefaultTimeout(8000);
+  page.on('pageerror', (e) => alice.errors.push(`[alice-2] pageerror: ${e.message}`));
+  alice.page = page;
+  await page.goto(`${server.base}/?s=${encodeURIComponent(code)}`);
+
+  await page.getByText(`Continue as Alice (${code})?`).waitFor();
+  assert.equal(await page.locator('#jn-code').count(), 0, 'join form is not shown over the resume banner');
+  await page.getByRole('button', { name: 'Continue', exact: true }).click();
+  await page.locator('.view-waiting').waitFor();
+  await host.page.getByText('2 people joined').waitFor();
+
+  await assertClean([host, alice]);
+});

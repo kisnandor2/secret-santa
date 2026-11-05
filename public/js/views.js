@@ -219,6 +219,17 @@ export function renderReveal({ result, boxOpened, onOpened }) {
   );
 }
 
+export function renderArchivedResult({ message, result, boxOpened, onOpened, onBack }) {
+  const r = createReveal({ assignedName: result.assignedName, assignedFunFact: result.assignedFunFact, onOpen: onOpened });
+  if (boxOpened) r.open(false);
+  return el('section', { class: 'view view-reveal' },
+    logo(),
+    el('p', { class: 'ended-msg', role: 'status' }, message),
+    r.node,
+    el('button', { type: 'button', class: 'btn link', onclick: onBack }, 'Back to start'),
+  );
+}
+
 export function renderEnded({ message, onBack }) {
   return el('section', { class: 'view view-ended' },
     logo(),

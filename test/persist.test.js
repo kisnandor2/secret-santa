@@ -82,6 +82,80 @@ describe('persist', () => {
     persistence.close();
   });
 
+  it('archives a drawn session on close: each token gets only its own result', () => {
+    const timers = fakeTimers();
+    const store = makeStore(timers);
+    const persistence = createPersistence({ dbPath, store, log: silentLog });
+
+    const host = store.createSession({ participate: true, ...person('Host', 'hf') });
+    const bob = store.join(host.code, person('Bob', 'bf'));
+    const cy = store.join(host.code, person('Cy', 'cf'));
+    store.draw(host.code, host.hostToken);
+    const expected = {
+      host: store.resultFor(host.code, host.participantId),
+      bob: store.resultFor(host.code, bob.participantId),
+      cy: store.resultFor(host.code, cy.participantId),
+    };
+    store.close(host.code, host.hostToken);
+
+    assert.deepEqual(persistence.getArchivedResult(host.code, host.hostToken), expected.host);
+    assert.deepEqual(persistence.getArchivedResult(host.code, bob.token), expected.bob);
+    assert.deepEqual(persistence.getArchivedResult(host.code, cy.token), expected.cy);
+    // wrong token, right code: nothing, never someone else's result
+    assert.equal(persistence.getArchivedResult(host.code, 'not-a-real-token'), null);
+    // right token, wrong code: nothing
+    assert.equal(persistence.getArchivedResult('NOPE-999', bob.token), null);
+
+    persistence.close();
+  });
+
+  it('archives a session that closed before the draw as having no result', () => {
+    const timers = fakeTimers();
+    const store = makeStore(timers);
+    const persistence = createPersistence({ dbPath, store, log: silentLog });
+
+    const host = store.createSession({ participate: false });
+    const bob = store.join(host.code, person('Bob', 'bf'));
+    store.close(host.code, host.hostToken);
+
+    assert.equal(persistence.getArchivedResult(host.code, bob.token), null);
+    persistence.close();
+  });
+
+  it('expired-while-down sessions are archived too, not just dropped', async () => {
+    const serverA = await startTestServer({ DB_PATH: dbPath });
+    try {
+      const created = await createSession(serverA.base, { name: 'Host', funFact: 'hf' });
+      const { code, hostToken } = created.body;
+      const bob = await join(serverA.base, code, { name: 'Bob', funFact: 'bf' });
+      await join(serverA.base, code, { name: 'Cy', funFact: 'cf' });
+      const bobWs = await openSocket(serverA.wsUrl, { auth: { code, token: bob.body.token } });
+      const hostWs = await openSocket(serverA.wsUrl, { auth: { code, token: hostToken } });
+      await hostWs.next('welcome');
+      hostWs.send({ type: 'start_draw' });
+      const bobExpected = await bobWs.next('draw_result');
+      await bobWs.close();
+      await hostWs.close();
+      await serverA.app.close();
+
+      const db = new DatabaseSync(dbPath);
+      db.prepare('UPDATE sessions SET created_at = ? WHERE code = ?').run(Date.now() - 999_000_000, code);
+      db.close();
+
+      const serverB = await startTestServer({ DB_PATH: dbPath });
+      try {
+        assert.equal(serverB.app.store.size(), 0); // dropped from the live store: its TTL had elapsed
+        const res = await fetch(`${serverB.base}/api/sessions/${code}/result?token=${encodeURIComponent(bob.body.token)}`);
+        assert.equal(res.status, 200);
+        assert.deepEqual(await res.json(), { assignedName: bobExpected.assignedName, assignedFunFact: bobExpected.assignedFunFact });
+      } finally {
+        await serverB.close();
+      }
+    } finally {
+      await serverA.app.close().catch(() => {});
+    }
+  });
+
   it('a fresh store restores sessions loaded from the same sqlite file', () => {
     const timers = fakeTimers();
     const store = makeStore(timers);
@@ -123,6 +197,40 @@ describe('persist', () => {
       () => createApp({ PORT: 0, DB_PATH: badPath, log: silentLog }),
       (err) => err.message.includes('DB_PATH'),
     );
+  });
+
+  it('reusing a closed session code does not leak the old archive into the new one', () => {
+    const timers = fakeTimers();
+    const store = makeStore(timers);
+    const persistence = createPersistence({ dbPath, store, log: silentLog });
+
+    const first = store.createSession({ participate: true, ...person('Host1', 'h1') });
+    const firstBob = store.join(first.code, person('Bob', 'bf'));
+    store.join(first.code, person('Cy', 'cf'));
+    store.draw(first.code, first.hostToken);
+    const firstBobResult = store.resultFor(first.code, firstBob.participantId);
+    store.close(first.code, first.hostToken);
+
+    // Force the same code to be reused for an unrelated second session.
+    const store2 = createStore({
+      ttlMs: TTL, maxSessions: 20, maxParticipants: 50, randomInt: seededRandomInt(42),
+      genCode: () => first.code, timers, now: timers.now, onListenerError: (e) => { throw e; },
+    });
+    const persistence2 = createPersistence({ dbPath, store: store2, log: silentLog });
+    const second = store2.createSession({ participate: true, ...person('Host2', 'h2') });
+    assert.equal(second.code, first.code);
+    const secondBob = store2.join(second.code, person('Bob', 'bf2'));
+    store2.join(second.code, person('Dee', 'df'));
+    store2.draw(second.code, second.hostToken);
+    const secondBobResult = store2.resultFor(second.code, secondBob.participantId);
+    store2.close(second.code, second.hostToken);
+
+    // Each Bob's own (distinct) token still finds only their own session's result.
+    assert.deepEqual(persistence2.getArchivedResult(first.code, firstBob.token), firstBobResult);
+    assert.deepEqual(persistence2.getArchivedResult(first.code, secondBob.token), secondBobResult);
+
+    persistence.close();
+    persistence2.close();
   });
 
   it('multiple sessions in one DB file persist and restore independently', () => {
@@ -202,6 +310,37 @@ describe('persist', () => {
       await hostWs2.close();
     } finally {
       await serverB.close();
+    }
+  });
+
+  it('GET /api/sessions/:code/result is 404 for a wrong token, and 404 when persistence is disabled', async () => {
+    const serverA = await startTestServer({ DB_PATH: dbPath });
+    const created = await createSession(serverA.base, { participate: false });
+    const { code, hostToken } = created.body;
+    const bob = await join(serverA.base, code, { name: 'Bob', funFact: 'bf' });
+    const hostWs = await openSocket(serverA.wsUrl, { auth: { code, token: hostToken } });
+    await hostWs.next('welcome');
+    hostWs.send({ type: 'start_draw' }); // only Bob exists, too few; ignore the error and just close
+    hostWs.send({ type: 'close_session' });
+    await hostWs.close();
+    await serverA.app.close();
+
+    const serverB = await startTestServer({ DB_PATH: dbPath });
+    try {
+      const wrong = await fetch(`${serverB.base}/api/sessions/${code}/result?token=wrong-token`);
+      assert.equal(wrong.status, 404);
+      const missing = await fetch(`${serverB.base}/api/sessions/${code}/result`);
+      assert.equal(missing.status, 404);
+    } finally {
+      await serverB.close();
+    }
+
+    const serverC = await startTestServer({}); // DB_PATH unset: persistence disabled
+    try {
+      const res = await fetch(`${serverC.base}/api/sessions/${code}/result?token=${encodeURIComponent(bob.body.token)}`);
+      assert.equal(res.status, 404);
+    } finally {
+      await serverC.close();
     }
   });
 

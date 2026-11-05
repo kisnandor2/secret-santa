@@ -21,6 +21,7 @@ authoritative** for technical detail.
 | D8 | Timers are injected into `store`; tests use a hand-written fake timer | Independent of how `mock.timers` behaves in a given Node version, and fully deterministic. |
 | D9 | Strict CSP, with no inline script or style | Defense in depth for the one real threat, XSS through names and fun facts. |
 | D10 | Sessions are optionally persisted to SQLite (`node:sqlite`, built into Node 24) via a listener on `store`'s existing events, not by making `store` do I/O | Keeps `store` synchronous and I/O-free (D5) so it stays unit-testable; persistence is a separate module (`persist.js`) the store doesn't know about. |
+| D11 | A closed session is archived forever (`sessions_archive`/`participants_archive`), looked up by `(code, token)` — one token, one result, never a list | The token is already this app's only credential (128-bit, unguessable) and the client already holds it; reusing it needs no new auth concept. The event is single-purpose and torn down after Christmas, so "forever" is an acceptable retention choice here, not a general pattern. |
 
 ---
 
@@ -396,6 +397,48 @@ process was down) are removed from the DB via `persistence.removeSession`.
 Since the DB holds tokens in plaintext, `DB_PATH` must point at a volume no
 one else can read; see §12.
 
+### 6.8 Archive: looking up a result after the session is gone (D11)
+
+When `removeSession(code)` runs — on `closed` (host close or TTL), *and* on
+app.js's startup cleanup of a session that expired while the process was
+down — it first copies whatever is currently on disk for that session into
+`sessions_archive`/`participants_archive`, then deletes the live rows. This
+is the only place that writes the archive; the live `sessions`/`participants`
+tables and `store.restoreSessions()` never see it.
+
+`code` is **not** the archive's key: the 28,800-code space (§5.2) gets reused
+over an event's lifetime, so the same code can belong to many archived
+sessions over time. `sessions_archive` has its own surrogate
+`archive_id INTEGER PRIMARY KEY AUTOINCREMENT`; `participants_archive` rows
+reference it, not `code`.
+
+```js
+persistence.getArchivedResult(code, token)  // → { assignedName, assignedFunFact } | null
+```
+
+Looks up every archived session under `code` (most recent first), and within
+each one, every participant, comparing `token` with `tokenEquals` (the same
+constant-time comparison `store.authenticate` uses). Returns the first match
+whose `assignedTo` resolves to a name — i.e. **one token → one result**,
+never a participant list, and never anyone else's match. A wrong token, an
+unknown code, or a session that closed before the draw all return `null`;
+the HTTP layer turns that into a uniform 404, same as an unknown code
+elsewhere, so there's nothing to distinguish by probing it.
+
+HTTP:
+
+| Method | Path | Request | Response |
+|---|---|---|---|
+| `GET` | `/api/sessions/:code/result?token=...` | – | `200 { assignedName, assignedFunFact }`, or `404 NOT_FOUND` if there's nothing for that `(code, token)` pair, or if `DB_PATH` isn't set |
+
+Client (`identity.js`/`main.js`): a session that closes with a drawn result
+no longer wipes the stored identity immediately. `main.js` calls
+`GET .../result` with the token it already has; if a result comes back, it's
+shown (reusing the gift-box reveal UI) and the identity is *kept*, so the
+"Continue as X?" banner on a later visit can show the same result again. If
+nothing comes back (never drawn, wrong token, or persistence disabled), the
+identity is cleared exactly as before this feature existed.
+
 ---
 
 ## 7. `src/hub.js` — WebSocket layer
@@ -494,6 +537,7 @@ All frames are UTF-8 JSON objects with a string `type` field.
 |---|---|---|---|
 | `POST` | `/api/sessions` | `{ participate?: boolean = true, name?: string, funFact?: string }` | `201 { code, hostToken, participantId: string \| null }` |
 | `POST` | `/api/sessions/:code/join` | `{ name: string, funFact?: string }` | `201 { code, participantId, token }` (`code` comes back normalized) |
+| `GET`  | `/api/sessions/:code/result?token=...` | – | `200 { assignedName, assignedFunFact }` or `404 NOT_FOUND` — see §6.8 |
 | `GET`  | `/healthz` | – | `200 { ok: true, sessions: n }` |
 | `GET`  | `/*` | – | Static files from `public/`. Unknown non-API paths serve `index.html`. |
 
@@ -548,7 +592,12 @@ The value stored is `{ code, token, role, name }`.
   3. If the URL has `?s=CODE` and there's no identity, open the join form
      with the code filled in. The host's screen shows this link and a
      "Copy link" button.
-- Any terminal close code (4xxx) clears both storages.
+- A terminal close code (4xxx) clears both storages — **except** `4010`
+  (`session_closed`): the client checks `GET /api/sessions/:code/result`
+  (§6.8) first, and only clears storage if that comes back empty. If it
+  returns a result, the identity is kept so "Continue" can show it again
+  later; `2.` above (the "Continue" banner) does the same archive check
+  before attempting a live reconnect, for exactly this reason.
 
 All storage access is wrapped in try/catch. If storage isn't available, the
 app still works, just without resuming.
@@ -559,7 +608,8 @@ app still works, just without resuming.
 landing ──Host──► hostCreate ──POST ok──► hostRoom(waiting) ──draw_complete──► hostRoom(drawn)
    │                                                                     └─ "Reveal my match" ─► revealed (local only)
    └─Participant─► join ──POST ok──► waiting ──draw_result──► reveal(box closed) ──tap──► reveal(opened)
-any ──terminal close──► ended(message)
+any ──terminal close (drawn, result found in archive)──► ended(message + result)
+any ──terminal close (otherwise)──► ended(message)
 ```
 
 - The view is derived from `(role, server state, local flags)`. Apart from
@@ -806,6 +856,14 @@ Uses a real SQLite file in a temp directory (`fs.mkdtempSync`), never
 - `createPersistence` (and `createApp`, transitively) throws immediately,
   naming `DB_PATH`, if the DB file can't be opened and written to (e.g. a
   missing directory) — and never reaches `listen()`.
+- Archive (§6.8): a closed, drawn session's result is retrievable per
+  participant by their own token, never anyone else's, and never a list. A
+  session closed before the draw has no archived result. A session that
+  expired while the process was down is archived too, not just dropped. A
+  session code reused for an unrelated later session doesn't leak the old
+  archive into a lookup against the new one (`archive_id`, not `code`, scopes
+  each archived session — see §6.8). `GET /api/sessions/:code/result` is a
+  uniform 404 for a wrong token, a missing token, and persistence disabled.
 
 ### 11.3 Integration tests
 

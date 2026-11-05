@@ -35,6 +35,7 @@ const s = {
   boxOpened: false,        // local only
   connected: false,
   ended: null,             // message string when in the ended view
+  endedResult: null,       // archived result shown alongside `ended`, if one was found
 };
 const seenIds = new Set();
 const confirmer = views.createConfirm();
@@ -61,7 +62,7 @@ function resetSessionState() {
     id: null, welcomed: false, role: null, code: null, name: null, participantId: null,
     serverState: 'waiting', participants: [], result: null, drawComplete: false,
     drawPending: false, revealedByHost: false, animateHostReveal: false, boxOpened: false,
-    connected: false,
+    connected: false, endedResult: null,
   });
   seenIds.clear();
   setStatus('connected');
@@ -136,9 +137,24 @@ function onMessage(msg) {
     case 'removed':
       endWith(MESSAGES[4011]);
       return;
-    case 'session_closed':
-      endWith(msg.reason === 'ttl' ? 'This session has expired.' : 'The host ended the session.');
+    case 'session_closed': {
+      if (s.ended) return; // a more specific message arrived first
+      const code = s.code;
+      const token = s.id?.token;
+      const message = msg.reason === 'ttl' ? 'This session has expired.' : 'The host ended the session.';
+      // Set synchronously: the WS 'close' (4010) that follows this message is a
+      // no-op once s.ended is set (see onTerminal's guard), so it can't race us.
+      s.ended = message;
+      resetSessionState();
+      try { history.replaceState(null, '', '/'); } catch { /* ignore */ }
+      render();
+      api.getArchivedResult(code, token).then((result) => {
+        if (result) s.endedResult = result;
+        else identity.clear(); // nothing to look up later; forget this identity, as before
+        render();
+      });
       return;
+    }
     case 'error':
       s.drawPending = false;
       toast(msg.message || 'Something went wrong.');
@@ -227,6 +243,7 @@ function onRemove(id) {
 }
 function backToStart() {
   s.ended = null;
+  s.endedResult = null;
   s.screen = 'landing';
   s.joinCode = '';
   try { history.replaceState(null, '', '/'); } catch { /* ignore */ }
@@ -235,7 +252,14 @@ function backToStart() {
 
 // ---- render ----------------------------------------------------------------
 function currentView() {
-  if (s.ended) return views.renderEnded({ message: s.ended, onBack: backToStart });
+  if (s.ended) {
+    return s.endedResult
+      ? views.renderArchivedResult({
+        message: s.ended, result: s.endedResult, boxOpened: s.boxOpened,
+        onOpened: () => { s.boxOpened = true; }, onBack: backToStart,
+      })
+      : views.renderEnded({ message: s.ended, onBack: backToStart });
+  }
 
   if (s.id) {
     if (!s.welcomed) return views.renderConnecting();
@@ -279,9 +303,18 @@ function currentView() {
     remembered: identity.loadRemembered(),
     onHost: () => { s.screen = 'hostCreate'; render(); },
     onParticipant: () => { s.screen = 'join'; render(); },
-    onContinue: () => {
+    onContinue: async () => {
       const r = identity.loadRemembered();
       if (!r) { render(); return; }
+      // The session may have closed since this identity was last used; check
+      // the archive before trying to open a live connection to it.
+      const result = await api.getArchivedResult(r.code, r.token);
+      if (result) {
+        s.ended = 'The draw is done! Here\'s your match.';
+        s.endedResult = result;
+        render();
+        return;
+      }
       identity.save(r); // copy into sessionStorage for this tab
       try { history.replaceState(null, '', '/?s=' + encodeURIComponent(r.code)); } catch { /* ignore */ }
       startConnection(r);

@@ -1,7 +1,7 @@
 // Express app: routes, security headers, static — see plan-impl.md §9
 import path from 'node:path';
 import express from 'express';
-import { AppError } from './errors.js';
+import { AppError, fail } from './errors.js';
 import { normalizeCode, parseCreateBody, parseJoinBody } from './validate.js';
 
 const CSP = [
@@ -16,7 +16,7 @@ const CSP = [
   "form-action 'self'",
 ].join('; ');
 
-export function createHttpApp({ store, publicDir, log }) {
+export function createHttpApp({ store, publicDir, log, persistence = null }) {
   const app = express();
   app.disable('x-powered-by');
 
@@ -46,6 +46,15 @@ export function createHttpApp({ store, publicDir, log }) {
     const out = store.join(code, parseJoinBody(req.body));
     log.info('participant_joined', { code });
     res.status(201).json({ code, ...out });
+  });
+
+  // One token -> one result, never a participant list: see persist.js's getArchivedResult.
+  // Only ever reachable for a session that has closed; a live session's result stays over WS.
+  api.get('/sessions/:code/result', (req, res) => {
+    const code = normalizeCode(req.params.code);
+    const result = persistence?.getArchivedResult(code, req.query.token) ?? null;
+    if (!result) fail('NOT_FOUND', 'No result found for that session and token.');
+    res.json(result);
   });
 
   api.use((req, res) => res.status(404).json({ error: 'NOT_FOUND', message: 'Unknown API endpoint.' }));

@@ -33,7 +33,7 @@ export function createApp(overrides = {}) {
     log.info('sessions_restored', { restored: restored.length, expired: expired.length });
   }
 
-  const server = http.createServer(createHttpApp({ store, publicDir, log }));
+  const server = http.createServer(createHttpApp({ store, publicDir, log, persistence }));
   const hub = createHub({ store, heartbeatMs: config.HEARTBEAT_MS, authTimeoutMs: config.AUTH_TIMEOUT_MS, log });
 
   // Must never throw: an exception here is uncaught and takes down the process (and every session).

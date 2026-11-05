@@ -40,7 +40,7 @@ secret_santa/
 │   ├── errors.js                # AppError + ERR catalogue
 │   ├── validate.js              # input normalization/validation (pure)
 │   ├── codes.js                 # session code + token + id generation
-│   ├── draw.js                  # Sattolo single-cycle assignment (pure)
+│   ├── draw.js                  # uniform single-cycle assignment (pure)
 │   ├── store.js                 # session state machine (pure, sync, event-emitting)
 │   ├── hub.js                   # WebSocket server: auth, registry, fan-out, heartbeat
 │   ├── http.js                  # Express app: routes, security headers, static
@@ -207,7 +207,9 @@ someone *join*, which the host can see and undo with remove.
 
 ```js
 /**
- * Sattolo's algorithm: a uniformly random cyclic permutation.
+ * Seat everyone in a uniformly random circle (Fisher–Yates), then each person
+ * gives to the next one. Every n-cycle comes from exactly n rotations of the
+ * seating, so all (n-1)! cycles are equally likely.
  * @param {readonly string[]} ids  length >= 2
  * @param {(maxExclusive:number)=>number} randomInt
  * @returns {Map<string,string>} giver id → receiver id
@@ -216,7 +218,7 @@ export function assign(ids, randomInt) {
   if (ids.length < 2) throw new RangeError('need at least 2 ids');
   const a = [...ids];
   for (let i = a.length - 1; i > 0; i--) {
-    const j = randomInt(i);                 // 0 <= j < i  — NOT i+1 (that would be Fisher–Yates)
+    const j = randomInt(i + 1);             // 0 <= j <= i
     [a[i], a[j]] = [a[j], a[i]];
   }
   return new Map(a.map((id, k) => [id, a[(k + 1) % a.length]]));
@@ -689,8 +691,10 @@ restarting the server.
 - The same seed gives the same output.
 - Uniformity for n = 4 with `seededRandomInt(42)`, 6000 runs: each of the 6
   possible cycles appears 1000 ± 200 times. That's about 7 standard
-  deviations, so it doesn't flake, yet it catches the `randomInt(i + 1)` bug
-  (which produces fixed points and fails earlier anyway).
+  deviations, so it doesn't flake, yet it catches biased shuffles. An earlier
+  version of this spec ran Sattolo's algorithm and then linked neighbours. That
+  version never produced one of the 6 cycles and produced another twice as
+  often, and this test caught it.
 - n < 2 throws `RangeError`.
 
 **`store.test.js`** (`fakeTimers` + `seededRandomInt`)

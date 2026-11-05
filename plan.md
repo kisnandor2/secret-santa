@@ -95,7 +95,7 @@ secret_santa/
 ├── src/
 │   ├── app.js                 (createApp({ store }) → { httpServer }; Express routes + ws wiring)
 │   ├── store.js               (createStore({ now, random, ttlMs, setTimeout }) — pure session logic)
-│   ├── draw.js                (assign(ids, random) — Sattolo's algorithm)
+│   ├── draw.js                (assign(ids, randomInt) — random circle)
 │   └── codes.js               (session code + token generation)
 ├── public/
 │   ├── index.html
@@ -198,8 +198,9 @@ Liveness: server pings every 30 s and terminates sockets that miss a pong, so
 the `connected` indicator is reliable.
 
 ## Draw algorithm
-Use **Sattolo's algorithm**, a Fisher–Yates variant that produces a uniformly
-random single cycle. Each participant gives to `order[i+1]`, wrapping around.
+Seat everyone in a **random circle**: shuffle with Fisher–Yates, and each
+person gives to the next one in the circle, wrapping around. All possible
+circles are equally likely.
 Compared with reject-and-retry derangement:
 - It never assigns anyone to themselves.
 - It never creates mutual pairs (A→B and B→A) for n ≥ 3, which makes the game
@@ -211,7 +212,7 @@ Compared with reject-and-retry derangement:
 function assign(ids, randomInt) {       // randomInt(max) → 0..max-1
   const a = [...ids];
   for (let i = a.length - 1; i > 0; i--) {
-    const j = randomInt(i);             // j < i  (Sattolo; Fisher–Yates uses i+1)
+    const j = randomInt(i + 1);         // 0 <= j <= i (Fisher–Yates)
     [a[i], a[j]] = [a[j], a[i]];
   }
   return new Map(a.map((id, i) => [id, a[(i + 1) % a.length]]));
@@ -246,8 +247,8 @@ No exclusion-list feature in v1.
 - There are no mutual pairs for n ≥ 3.
 - With a fixed seeded RNG, the output is deterministic.
 - Rough uniformity check for n = 4: across ~6000 runs, each of the 6 possible
-  cycles appears within a loose tolerance. This catches the classic
-  Sattolo/Fisher–Yates off-by-one.
+  cycles appears within a loose tolerance. This catches biased shuffles
+  (an early Sattolo-based version failed exactly this test).
 
 ### Unit: `store.test.js`
 - Create a session: the code has the expected format, and the token is unique.

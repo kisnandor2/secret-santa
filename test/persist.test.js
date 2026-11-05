@@ -11,6 +11,7 @@ import { fakeTimers } from './helpers/fakeTimers.js';
 import { seededRandomInt } from './helpers/rng.js';
 import { startTestServer } from './helpers/server.js';
 import { openSocket, createSession, join } from './helpers/wsClient.js';
+import { createApp } from '../src/app.js';
 
 const TTL = 120 * 60_000;
 const person = (name, funFact = '') => ({ name, nameKey: name.toLowerCase(), funFact });
@@ -105,6 +106,23 @@ describe('persist', () => {
     assert.equal(store2.hostView(r.code).state, 'drawn');
 
     persistence2.close();
+  });
+
+  it('fails fast with a clear error if the DB file cannot be opened or written', () => {
+    const store = makeStore(fakeTimers());
+    const badPath = path.join(dir, 'missing-subdir', 'sessions.db');
+    assert.throws(
+      () => createPersistence({ dbPath: badPath, store, log: silentLog }),
+      (err) => err.message.includes('DB_PATH') && err.message.includes(badPath),
+    );
+  });
+
+  it('createApp refuses to start (never listens) if DB_PATH is not writable', () => {
+    const badPath = path.join(dir, 'missing-subdir', 'sessions.db');
+    assert.throws(
+      () => createApp({ PORT: 0, DB_PATH: badPath, log: silentLog }),
+      (err) => err.message.includes('DB_PATH'),
+    );
   });
 
   it('multiple sessions in one DB file persist and restore independently', () => {

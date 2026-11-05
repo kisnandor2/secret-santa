@@ -29,8 +29,16 @@ const SCHEMA = `
 `;
 
 export function createPersistence({ dbPath, store, log }) {
-  const db = new DatabaseSync(dbPath);
-  db.exec(SCHEMA);
+  // Fail fast at startup if the SQLite backend can't be opened and written to
+  // (missing directory, read-only filesystem, wrong permissions, ...), rather
+  // than starting the app with persistence silently broken.
+  let db;
+  try {
+    db = new DatabaseSync(dbPath);
+    db.exec(SCHEMA); // CREATE TABLE IF NOT EXISTS: a real write, so this also proves the file is writable.
+  } catch (err) {
+    throw new Error(`Cannot open session database at DB_PATH=${JSON.stringify(dbPath)}: ${err.message}`, { cause: err });
+  }
 
   const upsertSession = db.prepare(`
     INSERT INTO sessions (code, host_token, host_participant_id, created_at, state)

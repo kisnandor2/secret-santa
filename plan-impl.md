@@ -374,9 +374,18 @@ Uses `node:sqlite` (`DatabaseSync`, built into Node 24, no new dependency),
 with two tables, `sessions` and `participants` (one row per participant, with
 a `seq` column to preserve join order). Writes are synchronous and
 transactional (`BEGIN`/`COMMIT`/`ROLLBACK`), so a session's row is never left
-half-written. A write that fails is logged (`persist_failed`) and the
-in-memory store is unaffected — persistence is a mirror, never a dependency
-of correctness while the process is up.
+half-written. A write that fails *after* startup is logged (`persist_failed`)
+and the in-memory store is unaffected — persistence is a mirror, never a
+dependency of correctness while the process is up.
+
+**Fail fast at startup:** opening the DB and running `CREATE TABLE IF NOT
+EXISTS` (a real write) happens inside `createPersistence`'s constructor, not
+lazily on the first event. If `DB_PATH` names a missing directory, a
+read-only filesystem, or anything else that can't be opened and written to,
+`createPersistence` throws immediately, naming `DB_PATH` and the underlying
+error. `createApp` calls it before building the HTTP server, so the process
+never starts listening — no half-up app silently running without
+persistence.
 
 **Startup (`app.js`):** if `config.DB_PATH` is set, `createPersistence(...)`
 is constructed right after `store`, then `store.restoreSessions(persistence.loadAll())`
@@ -790,6 +799,13 @@ Uses a real SQLite file in a temp directory (`fs.mkdtempSync`), never
   then a second `startTestServer({ DB_PATH })` against the same file. A
   participant's and the host's `draw_result` after reconnecting match what
   they got before the restart.
+- Two sessions in the same DB file persist, close, and restore independently
+  (closing one doesn't touch the other's rows).
+- `app.js` removes a session from the DB, not just from memory, when its TTL
+  elapsed while the process was down.
+- `createPersistence` (and `createApp`, transitively) throws immediately,
+  naming `DB_PATH`, if the DB file can't be opened and written to (e.g. a
+  missing directory) — and never reaches `listen()`.
 
 ### 11.3 Integration tests
 

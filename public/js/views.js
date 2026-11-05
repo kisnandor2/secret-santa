@@ -157,7 +157,7 @@ function card(p, { canRemove, onRemove, isNew }) {
 }
 
 export function renderHostRoom({
-  code, participants, drawn, drawPending, connected, participates, hostResult, revealedByHost,
+  code, link, participants, drawn, drawPending, connected, participates, hostResult, revealedByHost,
   animateHostReveal, seenIds, onCopy, onDraw, onEnd, onRemove, onRevealHost, onHideHost,
 }) {
   const count = participants.length;
@@ -190,6 +190,12 @@ export function renderHostRoom({
     logo('Share this code with your group'),
     el('div', { class: 'code-box' },
       el('p', { class: 'code', 'aria-label': `Session code ${code}` }, code),
+      // Always-visible link: the manual fallback when the browser refuses to copy for us
+      el('input', {
+        type: 'text', class: 'share-link', readonly: '', value: link, 'aria-label': 'Join link',
+        onfocus: (e) => e.target.select(),
+        onclick: (e) => e.target.setSelectionRange(0, e.target.value.length),
+      }),
       el('button', { type: 'button', class: 'btn secondary', onclick: onCopy }, 'Copy link'),
     ),
     el('p', { class: 'count', role: 'status' }, `${count} ${count === 1 ? 'person' : 'people'} joined`),

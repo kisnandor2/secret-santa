@@ -166,27 +166,41 @@ async function onJoin(code, body) {
   afterAuth({ code: r.code, token: r.token, role: 'participant', name: String(body.name).trim() });
 }
 
-async function copyLink() {
-  const link = location.origin + '/?s=' + s.code;
+const shareLink = () => location.origin + '/?s=' + s.code;
+
+// Pre-Clipboard-API copy, used on plain-http LAN addresses (not a secure context).
+// The textarea must be focused and editable, and selected with setSelectionRange:
+// otherwise iOS/Android select nothing, copy nothing, and still report success.
+function legacyCopy(text) {
+  const prevFocus = document.activeElement;
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.className = 'offscreen';
+  ta.setAttribute('aria-hidden', 'true');
+  document.body.append(ta);
+  let ok = false;
   try {
-    if (navigator.clipboard && window.isSecureContext) {
+    ta.focus({ preventScroll: true });
+    ta.select();
+    ta.setSelectionRange(0, text.length);
+    ok = document.execCommand('copy');
+  } catch { /* ok stays false */ }
+  ta.remove();
+  prevFocus?.focus?.({ preventScroll: true });
+  return ok;
+}
+
+async function copyLink() {
+  const link = shareLink();
+  if (navigator.clipboard && window.isSecureContext) {
+    try {
       await navigator.clipboard.writeText(link);
       toast('Link copied.');
       return;
-    }
-  } catch { /* fall through */ }
-  try {
-    const ta = document.createElement('textarea');
-    ta.value = link;
-    ta.className = 'offscreen';
-    ta.setAttribute('readonly', '');
-    document.body.append(ta);
-    ta.select();
-    const ok = document.execCommand('copy');
-    ta.remove();
-    if (ok) { toast('Link copied.'); return; }
-  } catch { /* fall through */ }
-  toast('Copy this link: ' + link);
+    } catch { /* fall through */ }
+  }
+  if (legacyCopy(link)) { toast('Link copied.'); return; }
+  toast('Couldn\'t copy automatically. Select the link above and copy it.');
 }
 
 async function onDraw() {
@@ -228,6 +242,7 @@ function currentView() {
     if (s.role === 'host') {
       const node = views.renderHostRoom({
         code: s.code,
+        link: shareLink(),
         participants: s.participants,
         drawn: s.serverState === 'drawn' || s.drawComplete,
         drawPending: s.drawPending,

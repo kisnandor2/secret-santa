@@ -71,6 +71,7 @@ async function hostCreate(host, { participate = true, name = 'Hosty', fact = 'I 
   await codeEl.waitFor();
   const code = (await codeEl.textContent()).trim();
   assert.match(code, /^[A-Z]+-\d+$/);
+  assert.equal(await page.locator('.share-link').inputValue(), `${server.base}/?s=${code}`, 'visible join link');
   return code;
 }
 

@@ -323,8 +323,7 @@ as literal text and no `<img>` element appears. Skip it if installing
 Playwright is a hassle; the integration tests cover the logic.
 
 ### Pre-event checklist (manual, ~5 min, on the actual server)
-1. `./start.sh`: runs the test suite in Docker, starts the container, waits for
-   the health check and prints the URLs to share (`./start.sh stop` tears it down).
+1. `./start.sh` (or `docker compose up -d --build`), then `curl http://<server>:81/healthz`.
 2. Open the URL from **another machine** on the same network (catches
    firewall/port 81 issues), plus one phone.
 3. Do a dry run with 3 browser windows: join, draw, reveal, refresh one

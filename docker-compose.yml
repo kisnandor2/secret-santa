@@ -1,0 +1,12 @@
+services:
+  santa:
+    build: .
+    image: secret-santa:local
+    ports: ["81:3000"]
+    restart: unless-stopped
+    init: true                  # proper PID 1 signal forwarding / zombie reaping
+    read_only: true             # app never writes to disk
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    environment:
+      SESSION_TTL_MIN: "120"

@@ -1,0 +1,19 @@
+{
+  "name": "secret-santa",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test --test-reporter=spec 'test/*.test.js'",
+    "test:e2e": "node --test --test-reporter=spec 'test/e2e/*.test.js'",
+    "test:all": "npm test && npm run test:e2e"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "playwright": "^1.48.0"
+  }
+}
